@@ -4,6 +4,7 @@ import torch.nn.functional as F
 from tqdm import tqdm
 
 def data_to_device(data, device='cpu'):
+	device = torch.device(device) if isinstance(device, str) else device
 	if isinstance(data, torch.Tensor):
 		data = data.to(device)
 	elif isinstance(data, tuple):
@@ -169,8 +170,8 @@ def save(path, model, optimizer=None, scheduler=None, epoch=-1, stats=None):
 		'scheduler_state_dict': scheduler.state_dict() if scheduler != None else None,
 	}, path)
 
-def load(path, model, optimizer=None, scheduler=None):
-	checkpoint = torch.load(path)
+def load(path, model, optimizer=None, scheduler=None, map_location='cpu'):
+	checkpoint = torch.load(path, map_location=map_location)
 	epoch = checkpoint['epoch']
 	stats = checkpoint['stats']
 	model.load_state_dict(checkpoint['model_state_dict'])

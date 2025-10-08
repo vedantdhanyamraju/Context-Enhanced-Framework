@@ -1,5 +1,4 @@
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 os.environ["OMP_NUM_THREADS"] = "1"
 import numpy as np
 import sklearn.metrics as metrics
@@ -12,6 +11,15 @@ from utils import save, load, train, test, data_to_device, data_concatenate
 from datasets import MIMIC, IUXRAY
 from losses import CELossTotal
 from models import CNN, MVCNN, TNN, Classifier, Generator, Context
+
+
+def get_training_device():
+    """Return the best available device for training."""
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
 
 def find_optimal_cutoff(target, predicted):
     fpr, tpr, threshold = metrics.roc_curve(target, predicted)
@@ -45,9 +53,15 @@ def infer(data_loader, model, device='cpu', threshold=None):
         targets = data_concatenate(targets)
 
     return outputs, targets
-print(torch.cuda.is_available())
-print(torch.cuda.device_count())
-print(torch.cuda.get_device_name(0))
+DEVICE = get_training_device()
+print('Using device:', DEVICE)
+if DEVICE.type == 'cuda':
+    print('CUDA available:', torch.cuda.is_available())
+    print('CUDA device count:', torch.cuda.device_count())
+    if torch.cuda.device_count() > 0:
+        print('CUDA device name:', torch.cuda.get_device_name(0))
+elif DEVICE.type == 'mps':
+    print('MPS (Apple Metal) backend is available.')
 torch.set_num_threads(1)
 torch.manual_seed(seed=123)
 
@@ -144,7 +158,9 @@ if __name__ == "__main__":
     val_loader = data.DataLoader(val_data, batch_size=BATCH_SIZE, shuffle=False, num_workers=8)
     test_loader = data.DataLoader(test_data, batch_size=BATCH_SIZE, shuffle=False, num_workers=8)
 
-    model = nn.DataParallel(model).cuda()
+    if DEVICE.type == 'cuda' and torch.cuda.device_count() > 1:
+        model = nn.DataParallel(model)
+    model = model.to(DEVICE)
     optimizer = optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=LR, weight_decay=WD)
     scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=MILESTONES)
 
@@ -157,17 +173,17 @@ if __name__ == "__main__":
     checkpoint_path_to = 'checkpoints/{}_{}_{}_{}.pt'.format(DATASET_NAME,MODEL_NAME,BACKBONE_NAME,COMMENT)
     
     if RELOAD:
-        last_epoch, (best_metric, test_metric) = load(checkpoint_path_from, model, optimizer, scheduler)
+        last_epoch, (best_metric, test_metric) = load(checkpoint_path_from, model, optimizer, scheduler, map_location=DEVICE)
         print('Reload From: {} | Last Epoch: {} | Validation Metric: {} | Test Metric: {}'.format(checkpoint_path_from, last_epoch, best_metric, test_metric))
 
     if PHASE == 'TRAIN':
-        scaler = torch.cuda.amp.GradScaler()
-        
+        scaler = torch.cuda.amp.GradScaler() if DEVICE.type == 'cuda' else None
+
         for epoch in range(last_epoch+1, EPOCHS):
             print('Epoch:', epoch)
-            train_loss = train(train_loader, model, optimizer, criterion, device='cuda', kw_src=KW_SRC, kw_tgt=KW_TGT, kw_out=KW_OUT, scaler=scaler)
-            val_loss = test(val_loader, model, criterion, device='cuda', kw_src=KW_SRC, kw_tgt=KW_TGT, kw_out=KW_OUT, return_results=False)
-            test_loss = test(test_loader, model, criterion, device='cuda', kw_src=KW_SRC, kw_tgt=KW_TGT, kw_out=KW_OUT, return_results=False)
+            train_loss = train(train_loader, model, optimizer, criterion, device=DEVICE, kw_src=KW_SRC, kw_tgt=KW_TGT, kw_out=KW_OUT, scaler=scaler)
+            val_loss = test(val_loader, model, criterion, device=DEVICE, kw_src=KW_SRC, kw_tgt=KW_TGT, kw_out=KW_OUT, return_results=False)
+            test_loss = test(test_loader, model, criterion, device=DEVICE, kw_src=KW_SRC, kw_tgt=KW_TGT, kw_out=KW_OUT, return_results=False)
             
             scheduler.step()
             
@@ -178,7 +194,7 @@ if __name__ == "__main__":
                 print('Saved To:', checkpoint_path_to)
 
     elif PHASE == 'INFER':
-        txt_test_outputs, txt_test_targets = infer(test_loader, model, device='cuda', threshold=0.15)
+        txt_test_outputs, txt_test_targets = infer(test_loader, model, device=DEVICE, threshold=0.15)
         gen_outputs = txt_test_outputs[0]
         gen_targets = txt_test_targets[0]
 
